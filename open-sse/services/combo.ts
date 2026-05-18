@@ -35,6 +35,7 @@ import {
   type ScoringWeights,
 } from "./autoCombo/scoring.ts";
 import { supportsToolCalling } from "./modelCapabilities.ts";
+import { measureRequestShape, shouldSkipTargetForRequestShape } from "./requestShapePolicy.ts";
 import { getSessionConnection } from "./sessionManager.ts";
 import { generateRoutingHints } from "./manifestAdapter";
 import type { RoutingHint } from "./manifestAdapter";
@@ -1677,6 +1678,21 @@ export async function handleComboChat({
       : resolveComboTargets(combo, allCombos);
 
   orderedTargets = await applyRequestTagRouting(orderedTargets, body, log);
+
+  const requestShape = measureRequestShape(body);
+  const shapeFilteredTargets = orderedTargets.filter((target) => {
+    const decision = shouldSkipTargetForRequestShape(
+      target.provider,
+      target.modelStr,
+      requestShape
+    );
+    if (!decision.skip) return true;
+    log.info("COMBO", `Skipping ${target.modelStr} for request shape: ${decision.reason}`);
+    return false;
+  });
+  if (shapeFilteredTargets.length > 0) {
+    orderedTargets = shapeFilteredTargets;
+  }
 
   if (strategy === "weighted") {
     log.info(

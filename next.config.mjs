@@ -73,6 +73,8 @@ const nextConfig = {
   // accept for image-bearing requests; tune via env if a deployment needs
   // more.
   experimental: {
+    proxyClientMaxBodySize:
+      Number.parseInt(process.env.MAX_BODY_SIZE_BYTES || "", 10) || 100 * 1024 * 1024,
     serverActions: {
       bodySizeLimit: process.env.OMNIROUTE_SERVER_ACTIONS_BODY_LIMIT || "50mb",
     },
