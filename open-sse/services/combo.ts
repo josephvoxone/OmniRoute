@@ -946,6 +946,73 @@ function getTargetConnectionIds(
   return connectionIds;
 }
 
+function parseFutureTimestamp(value: unknown): number | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && time > Date.now() ? time : null;
+}
+
+function getConnectionSkipReason(connection: Record<string, unknown>): string | null {
+  if (connection.isActive === false) return "inactive_connection";
+
+  const status = typeof connection.testStatus === "string" ? connection.testStatus : "";
+  if (["expired", "unavailable", "credits_exhausted"].includes(status)) {
+    return `connection_status_${status}`;
+  }
+
+  const rateLimitedUntil = parseFutureTimestamp(connection.rateLimitedUntil);
+  if (rateLimitedUntil) {
+    return `connection_rate_limited_until_${new Date(rateLimitedUntil).toISOString()}`;
+  }
+
+  return null;
+}
+
+async function filterTargetsByConnectionHealth(
+  targets: ResolvedComboTarget[],
+  log: { info?: (...args: unknown[]) => void }
+) {
+  if (targets.length === 0) return targets;
+
+  const providerIds = [...new Set(targets.map((target) => target.provider).filter(Boolean))];
+  const connectionsByProvider = new Map<string, Array<Record<string, unknown>>>();
+
+  await Promise.all(
+    providerIds.map(async (provider) => {
+      try {
+        const connections = await getProviderConnections({ provider, isActive: true });
+        connectionsByProvider.set(
+          provider,
+          Array.isArray(connections) ? (connections as Array<Record<string, unknown>>) : []
+        );
+      } catch {
+        connectionsByProvider.set(provider, []);
+      }
+    })
+  );
+
+  const filtered = targets.filter((target) => {
+    const connections = connectionsByProvider.get(target.provider) || [];
+    if (connections.length === 0) return true;
+
+    const candidateConnections = target.connectionId
+      ? connections.filter((connection) => connection.id === target.connectionId)
+      : connections;
+    if (candidateConnections.length === 0) return true;
+
+    const usableConnection = candidateConnections.find(
+      (connection) => getConnectionSkipReason(connection) === null
+    );
+    if (usableConnection) return true;
+
+    const reason = getConnectionSkipReason(candidateConnections[0]) || "connection_unavailable";
+    log.info?.("COMBO", `Skipping ${target.modelStr} for connection health: ${reason}`);
+    return false;
+  });
+
+  return filtered.length > 0 ? filtered : targets;
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -1693,6 +1760,8 @@ export async function handleComboChat({
   if (shapeFilteredTargets.length > 0) {
     orderedTargets = shapeFilteredTargets;
   }
+
+  orderedTargets = await filterTargetsByConnectionHealth(orderedTargets, log);
 
   if (strategy === "weighted") {
     log.info(
